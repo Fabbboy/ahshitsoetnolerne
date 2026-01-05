@@ -55,6 +55,7 @@ export default function HomeClient() {
   const [editPrompt, setEditPrompt] = useState("");
   const [isEditing, setIsEditing] = useState(false);
   const [editStatus, setEditStatus] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"editor" | "preview">("editor");
   const [paperSize, setPaperSize] = useState<PaperSize>(defaultPolicy.size);
   const [paperOrientation, setPaperOrientation] = useState<PaperOrientation>(
     defaultPolicy.orientation
@@ -917,22 +918,58 @@ export default function HomeClient() {
 
         <main className="grid flex-1 gap-6 lg:grid-cols-[1.05fr_0.95fr] lg:items-start">
           <div className="flex flex-col gap-6">
-            <EditorPanel
-              draft={draft}
-              stats={stats}
-              lastSaved={lastSaved}
-              isRestored={isRestored}
-              paperStyle={paperStyle}
-              fontSizePx={fontSizePx}
-              onDraftChange={setDraft}
-            />
-            <AiEditPanel
-              prompt={editPrompt}
-              isEditing={isEditing}
-              statusMessage={editStatus}
-              onPromptChange={setEditPrompt}
-              onApply={handleAiEdit}
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
+                  activeTab === "editor"
+                    ? "border-zinc-900 bg-zinc-900 text-zinc-50"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100"
+                }`}
+                onClick={() => setActiveTab("editor")}
+              >
+                Editor
+              </button>
+              <button
+                type="button"
+                className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.2em] transition ${
+                  activeTab === "preview"
+                    ? "border-zinc-900 bg-zinc-900 text-zinc-50"
+                    : "border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-100"
+                }`}
+                onClick={() => setActiveTab("preview")}
+              >
+                Preview
+              </button>
+            </div>
+            {activeTab === "editor" ? (
+              <>
+                <EditorPanel
+                  draft={draft}
+                  stats={stats}
+                  lastSaved={lastSaved}
+                  isRestored={isRestored}
+                  paperStyle={paperStyle}
+                  fontSizePx={fontSizePx}
+                  onDraftChange={setDraft}
+                />
+                <AiEditPanel
+                  prompt={editPrompt}
+                  isEditing={isEditing}
+                  statusMessage={editStatus}
+                  onPromptChange={setEditPrompt}
+                  onApply={handleAiEdit}
+                />
+              </>
+            ) : (
+              <PreviewPanel
+                draft={draft}
+                paperStyle={paperStyle}
+                fontSizePx={fontSizePx}
+                contentRef={previewRef}
+                className="min-h-[60vh]"
+              />
+            )}
           </div>
 
           <div className="flex flex-col gap-6 lg:sticky lg:top-6 lg:max-h-[calc(100vh-4rem)] lg:overflow-auto lg:pr-2">
@@ -979,12 +1016,6 @@ export default function HomeClient() {
             />
             <ModelLogPanel logs={modelLogs} />
             <ToolLogPanel logs={toolLogs} />
-            <PreviewPanel
-              draft={draft}
-              paperStyle={paperStyle}
-              fontSizePx={fontSizePx}
-              contentRef={previewRef}
-            />
           </div>
         </main>
       </div>
