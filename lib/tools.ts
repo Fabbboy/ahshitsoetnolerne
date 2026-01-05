@@ -9,6 +9,16 @@ export type SedArgs = {
   content?: string;
 };
 
+export type ReadArgs = {
+  range: string;
+};
+
+export type PatchArgs = {
+  find: string;
+  replace: string;
+  count?: number | "all";
+};
+
 export function defineTools() {
   return [
     {
@@ -62,6 +72,44 @@ export function defineTools() {
             },
           },
           required: ["action", "range"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "Read",
+        description:
+          "Read numbered lines from the current cheat sheet for context.",
+        parameters: {
+          type: "object",
+          properties: {
+            range: {
+              type: "string",
+              description: "Line range like '1-20', '5-12', or 'all'.",
+            },
+          },
+          required: ["range"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "Patch",
+        description:
+          "Apply a targeted string replacement without rewriting the full document.",
+        parameters: {
+          type: "object",
+          properties: {
+            find: { type: "string" },
+            replace: { type: "string" },
+            count: {
+              oneOf: [{ type: "number" }, { type: "string", enum: ["all"] }],
+              description: "How many occurrences to replace (default 1).",
+            },
+          },
+          required: ["find", "replace"],
         },
       },
     },
@@ -136,15 +184,14 @@ export async function fetchUrlText(url: string): Promise<string> {
 
 export function runSedCommand(draft: string, args: SedArgs): ToolResult {
   const lines = draft.split("\n");
-  const rangeMatch = args.range.match(/^(\d+)(?:-(\d+))?$/);
-  if (!rangeMatch) {
+  if (!args.range) {
+    return { result: "Range is required for Sed." };
+  }
+  const parsed = parseRange(args.range, lines.length);
+  if (!parsed) {
     return { result: "Invalid range format. Use '1-5' or '3'." };
   }
-  const start = Number(rangeMatch[1]);
-  const end = Number(rangeMatch[2] ?? rangeMatch[1]);
-  if (start < 1 || end < start || end > lines.length) {
-    return { result: "Range out of bounds for current draft." };
-  }
+  const { start, end } = parsed;
   if (args.action === "view") {
     const view = lines.slice(start - 1, end).join("\n");
     return { result: view || "(empty selection)" };
@@ -161,9 +208,65 @@ export function runSedCommand(draft: string, args: SedArgs): ToolResult {
   };
 }
 
+export function runReadCommand(draft: string, args: ReadArgs): ToolResult {
+  const lines = draft.split("\n");
+  if (!args.range) {
+    return { result: "Range is required for Read." };
+  }
+  if (args.range === "all") {
+    return { result: formatNumberedLines(lines, 1) };
+  }
+  const parsed = parseRange(args.range, lines.length);
+  if (!parsed) {
+    return { result: "Invalid range format. Use '1-20', '5-12', or 'all'." };
+  }
+  const { start, end } = parsed;
+  const slice = lines.slice(start - 1, end);
+  return { result: formatNumberedLines(slice, start) };
+}
+
+export function runPatchCommand(draft: string, args: PatchArgs): ToolResult {
+  if (!args.find) {
+    return { result: "Patch find string is empty." };
+  }
+  if (!draft.includes(args.find)) {
+    return { result: "Patch target not found in the draft." };
+  }
+  const count = args.count ?? 1;
+  let updated = draft;
+  if (count === "all") {
+    updated = draft.split(args.find).join(args.replace);
+  } else {
+    let remaining = typeof count === "number" ? Math.max(1, count) : 1;
+    while (remaining > 0 && updated.includes(args.find)) {
+      updated = updated.replace(args.find, args.replace);
+      remaining -= 1;
+    }
+  }
+  return {
+    result: "Patch applied.",
+    updatedDraft: updated,
+  };
+}
+
 function stripHtml(html: string): string {
   const noScripts = html.replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, "");
   const noStyles = noScripts.replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, "");
   const noTags = noStyles.replace(/<[^>]+>/g, " ");
   return noTags.replace(/\s+/g, " ").trim();
+}
+
+function parseRange(range: string, max: number) {
+  const match = range.match(/^(\d+)(?:-(\d+))?$/);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2] ?? match[1]);
+  if (start < 1 || end < start || end > max) return null;
+  return { start, end };
+}
+
+function formatNumberedLines(lines: string[], startIndex: number) {
+  return lines
+    .map((line, idx) => `${startIndex + idx} | ${line}`)
+    .join("\n");
 }

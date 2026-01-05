@@ -10,10 +10,12 @@ type SettingsPanelProps = {
   apiKey: string;
   modelName: string;
   availableModels: string[];
+  retryCount: number;
   testStatus: TestStatus | null;
   onEndpointChange: (value: string) => void;
   onApiKeyChange: (value: string) => void;
   onModelChange: (value: string) => void;
+  onRetryCountChange: (value: number) => void;
   onLoadModels: () => void;
   onTestConnection: () => void;
 };
@@ -23,10 +25,12 @@ export default function SettingsPanel({
   apiKey,
   modelName,
   availableModels,
+  retryCount,
   testStatus,
   onEndpointChange,
   onApiKeyChange,
   onModelChange,
+  onRetryCountChange,
   onLoadModels,
   onTestConnection,
 }: SettingsPanelProps) {
@@ -82,6 +86,19 @@ export default function SettingsPanel({
               ))
             )}
           </select>
+        </label>
+        <label className="grid gap-2">
+          <span className="text-xs uppercase tracking-[0.2em] text-zinc-500">
+            Retry attempts
+          </span>
+          <input
+            className="rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-zinc-400"
+            type="number"
+            min={0}
+            max={6}
+            value={retryCount}
+            onChange={(event) => onRetryCountChange(Number(event.target.value))}
+          />
         </label>
         <div className="flex flex-wrap items-center gap-3">
           <button

@@ -10,7 +10,7 @@ import MaterialsPanel from "@/components/home/MaterialsPanel";
 import GeneratePanel from "@/components/home/GeneratePanel";
 import { extractPdfText } from "@/lib/pdf";
 import ToolLogPanel from "@/components/home/ToolLogPanel";
-import { defineTools, fetchUrlText, fetchWikipediaExtract, runSedCommand } from "@/lib/tools";
+import { defineTools, fetchUrlText, fetchWikipediaExtract, runPatchCommand, runReadCommand, runSedCommand } from "@/lib/tools";
 import PolicyPanel from "@/components/home/PolicyPanel";
 import ModelLogPanel from "@/components/home/ModelLogPanel";
 import { getContentDimensions, getPaperDimensions, type PaperOrientation, type PaperSize } from "@/lib/paper";
@@ -43,6 +43,7 @@ export default function HomeClient() {
   const [modelName, setModelName] = useState("gpt-4o-mini");
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [testStatus, setTestStatus] = useState<TestStatus | null>(null);
+  const [retryCount, setRetryCount] = useState(2);
   const [materialsText, setMaterialsText] = useState("");
   const [materialsFileName, setMaterialsFileName] = useState<string | null>(null);
   const [isParsing, setIsParsing] = useState(false);
@@ -77,10 +78,14 @@ export default function HomeClient() {
           endpointUrl?: string;
           apiKey?: string;
           modelName?: string;
+          retryCount?: number;
         };
         if (parsed.endpointUrl) setEndpointUrl(parsed.endpointUrl);
         if (parsed.apiKey) setApiKey(parsed.apiKey);
         if (parsed.modelName) setModelName(parsed.modelName);
+        if (typeof parsed.retryCount === "number") {
+          setRetryCount(clampRetry(parsed.retryCount));
+        }
       } catch {
         // Ignore malformed settings.
       }
@@ -120,11 +125,16 @@ export default function HomeClient() {
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
-      const payload = JSON.stringify({ endpointUrl, apiKey, modelName });
+      const payload = JSON.stringify({
+        endpointUrl,
+        apiKey,
+        modelName,
+        retryCount,
+      });
       window.localStorage.setItem(SETTINGS_KEY, payload);
     }, 300);
     return () => window.clearTimeout(timeout);
-  }, [endpointUrl, apiKey, modelName]);
+  }, [endpointUrl, apiKey, modelName, retryCount]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -297,7 +307,8 @@ export default function HomeClient() {
       ];
 
       const tools = defineTools();
-      const maxIterations = 4;
+      const maxIterations = 4 + clampRetry(retryCount) * 2;
+      let workingDraft = draft;
 
       for (let i = 0; i < maxIterations; i += 1) {
         setModelLogs((prev) => [
@@ -338,6 +349,7 @@ export default function HomeClient() {
           choices?: {
             message?: {
               content?: string;
+              reasoning?: string;
               tool_calls?: Array<{
                 id: string;
                 function: { name: string; arguments: string };
@@ -347,6 +359,10 @@ export default function HomeClient() {
           }[];
         };
         const message = data.choices?.[0]?.message;
+        console.debug("[AI generate] message", message);
+        if (message?.reasoning) {
+          console.debug("[AI generate] reasoning", message.reasoning);
+        }
         if (!message) {
           setGenerationStatus("No response message returned by the model.");
           setModelLogs((prev) => [
@@ -362,6 +378,7 @@ export default function HomeClient() {
 
         if (message.tool_calls && message.tool_calls.length > 0) {
           const names = message.tool_calls.map((call) => call.function.name).join(", ");
+          console.debug("[AI generate] tool calls", message.tool_calls);
           setModelLogs((prev) => [
             ...prev,
             {
@@ -403,6 +420,7 @@ export default function HomeClient() {
 
             let toolResult = "Tool executed.";
             try {
+              console.debug("[AI generate] tool call", toolName, parsedArgs);
               if (toolName === "Fetch") {
                 const url = String(parsedArgs.url || "");
                 const approved = window.confirm(
@@ -439,17 +457,41 @@ export default function HomeClient() {
                 });
               } else if (toolName === "Sed") {
                 const { result, updatedDraft } = runSedCommand(
-                  draft,
+                  workingDraft,
                   parsedArgs
                 );
                 toolResult = result;
                 if (updatedDraft !== undefined) {
+                  workingDraft = updatedDraft;
                   setDraft(updatedDraft);
                 }
                 pushLog({
                   ...baseLog,
                   status: "completed",
                   message: `Sed ${parsedArgs.action || "run"} ${parsedArgs.range || ""}`,
+                });
+              } else if (toolName === "Read") {
+                const { result } = runReadCommand(workingDraft, parsedArgs);
+                toolResult = result;
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: `Read ${parsedArgs.range || ""}`,
+                });
+              } else if (toolName === "Patch") {
+                const { result, updatedDraft } = runPatchCommand(
+                  workingDraft,
+                  parsedArgs
+                );
+                toolResult = result;
+                if (updatedDraft !== undefined) {
+                  workingDraft = updatedDraft;
+                  setDraft(updatedDraft);
+                }
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: "Patch applied",
                 });
               } else if (toolName === "Question") {
                 const question = String(parsedArgs.question || "Provide input:");
@@ -491,6 +533,7 @@ export default function HomeClient() {
               tool_call_id: toolCall.id,
               content: toolResult,
             });
+            console.debug("[AI generate] tool result", toolName, toolResult);
           }
           continue;
         }
@@ -575,11 +618,19 @@ export default function HomeClient() {
       const normalized = endpointUrl.replace(/\/$/, "");
       const systemPrompt = [
         "You are editing an existing markdown cheat sheet.",
-        "Use the Sed tool to make precise line-based changes.",
+        "Use Read to inspect the current text before editing if needed.",
+        "Use Sed or Patch to make precise changes.",
         "Do not output the full document unless explicitly asked.",
       ].join(" ");
 
-      const tools = defineTools();
+      const editTools = defineTools().filter((tool) => {
+        const name = tool.function.name;
+        return ["Read", "Sed", "Patch", "Question", "Think"].includes(name);
+      });
+      const numberedDraft = draft
+        .split("\n")
+        .map((line, idx) => `${idx + 1} | ${line}`)
+        .join("\n");
       const messages: Array<
         | { role: "system"; content: string }
         | { role: "user"; content: string }
@@ -589,11 +640,13 @@ export default function HomeClient() {
         { role: "system", content: systemPrompt },
         {
           role: "user",
-          content: `Current draft:\n${draft}\n\nEdit request:\n${editPrompt}`,
+          content: `Current draft (numbered lines):\n${numberedDraft}\n\nEdit request:\n${editPrompt}`,
         },
       ];
 
-      const maxIterations = 4;
+      const maxIterations = 4 + clampRetry(retryCount) * 2;
+      let workingDraft = draft;
+      let contentOnlyResponses = 0;
       for (let i = 0; i < maxIterations; i += 1) {
         setModelLogs((prev) => [
           ...prev,
@@ -613,7 +666,7 @@ export default function HomeClient() {
             model: modelName,
             temperature: 0.2,
             messages,
-            tools,
+            tools: editTools,
             tool_choice: "auto",
           }),
         });
@@ -633,6 +686,7 @@ export default function HomeClient() {
           choices?: {
             message?: {
               content?: string;
+              reasoning?: string;
               tool_calls?: Array<{
                 id: string;
                 function: { name: string; arguments: string };
@@ -641,6 +695,10 @@ export default function HomeClient() {
           }[];
         };
         const message = data.choices?.[0]?.message;
+        console.debug("[AI edit] message", message);
+        if (message?.reasoning) {
+          console.debug("[AI edit] reasoning", message.reasoning);
+        }
         if (!message) {
           setEditStatus("No response message returned by the model.");
           setModelLogs((prev) => [
@@ -656,6 +714,7 @@ export default function HomeClient() {
 
         if (message.tool_calls && message.tool_calls.length > 0) {
           const names = message.tool_calls.map((call) => call.function.name).join(", ");
+          console.debug("[AI edit] tool calls", message.tool_calls);
           setModelLogs((prev) => [
             ...prev,
             {
@@ -697,6 +756,7 @@ export default function HomeClient() {
 
             let toolResult = "Tool executed.";
             try {
+              console.debug("[AI edit] tool call", toolName, parsedArgs);
               if (toolName === "Fetch") {
                 const url = String(parsedArgs.url || "");
                 const approved = window.confirm(
@@ -733,17 +793,41 @@ export default function HomeClient() {
                 });
               } else if (toolName === "Sed") {
                 const { result, updatedDraft } = runSedCommand(
-                  draft,
+                  workingDraft,
                   parsedArgs
                 );
                 toolResult = result;
                 if (updatedDraft !== undefined) {
+                  workingDraft = updatedDraft;
                   setDraft(updatedDraft);
                 }
                 pushLog({
                   ...baseLog,
                   status: "completed",
                   message: `Sed ${parsedArgs.action || "run"} ${parsedArgs.range || ""}`,
+                });
+              } else if (toolName === "Read") {
+                const { result } = runReadCommand(workingDraft, parsedArgs);
+                toolResult = result;
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: `Read ${parsedArgs.range || ""}`,
+                });
+              } else if (toolName === "Patch") {
+                const { result, updatedDraft } = runPatchCommand(
+                  workingDraft,
+                  parsedArgs
+                );
+                toolResult = result;
+                if (updatedDraft !== undefined) {
+                  workingDraft = updatedDraft;
+                  setDraft(updatedDraft);
+                }
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: "Patch applied",
                 });
               } else if (toolName === "Question") {
                 const question = String(parsedArgs.question || "Provide input:");
@@ -785,24 +869,39 @@ export default function HomeClient() {
               tool_call_id: toolCall.id,
               content: toolResult,
             });
+            console.debug("[AI edit] tool result", toolName, toolResult);
           }
           continue;
         }
 
         const content = message.content?.trim();
         if (content) {
-          setEditStatus(
-            "Model returned a full response. Ask for a more specific edit."
-          );
+          contentOnlyResponses += 1;
           setModelLogs((prev) => [
             ...prev,
             {
               id: `edit-content-${i}`,
               status: "error",
-              message: "Model returned content instead of tool edits.",
+              message:
+                "Model returned content instead of tool edits. Retrying with stricter instructions.",
             },
           ]);
-          return;
+          messages.push({
+            role: "assistant",
+            content,
+          });
+          messages.push({
+            role: "user",
+            content:
+              "Do not write the full document. Use Read, Sed, or Patch tools only.",
+          });
+          if (contentOnlyResponses >= 3) {
+            setEditStatus(
+              "Model keeps returning full content. Try a narrower edit request."
+            );
+            return;
+          }
+          continue;
         }
 
         setEditStatus("Edit applied.");
@@ -978,10 +1077,12 @@ export default function HomeClient() {
               apiKey={apiKey}
               modelName={modelName}
               availableModels={availableModels}
+              retryCount={retryCount}
               testStatus={testStatus}
               onEndpointChange={setEndpointUrl}
               onApiKeyChange={setApiKey}
               onModelChange={setModelName}
+              onRetryCountChange={(value) => setRetryCount(clampRetry(value))}
               onLoadModels={handleLoadModels}
               onTestConnection={handleTestConnection}
             />
@@ -1021,4 +1122,9 @@ export default function HomeClient() {
       </div>
     </div>
   );
+}
+
+function clampRetry(value: number) {
+  if (Number.isNaN(value)) return 0;
+  return Math.max(0, Math.min(6, Math.round(value)));
 }
