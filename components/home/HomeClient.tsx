@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
 import { DRAFT_KEY, POLICY_KEY, SETTINGS_KEY, defaultPolicy, starterDraft } from "@/lib/constants";
 import Header from "@/components/home/Header";
 import EditorPanel from "@/components/home/EditorPanel";
@@ -64,6 +65,7 @@ export default function HomeClient() {
   const [marginMm, setMarginMm] = useState(defaultPolicy.marginMm);
   const [fontSizePx, setFontSizePx] = useState(defaultPolicy.fontSizePx);
   const previewRef = useRef<HTMLDivElement | null>(null);
+  const exportRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(DRAFT_KEY);
@@ -943,7 +945,7 @@ export default function HomeClient() {
   };
 
   const handleExportPdf = () => {
-    const previewHtml = previewRef.current?.innerHTML;
+    const previewHtml = exportRef.current?.innerHTML;
     if (!previewHtml) {
       setGenerationStatus("Nothing to export yet.");
       return;
@@ -1014,6 +1016,11 @@ export default function HomeClient() {
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,_#f4f1ea_0%,_#f7f6f1_32%,_#efe8dd_100%)] text-zinc-900">
       <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-10">
         <Header />
+        <div className="sr-only" aria-hidden="true">
+          <div ref={exportRef} className="prose max-w-none">
+            <ReactMarkdown>{draft}</ReactMarkdown>
+          </div>
+        </div>
 
         <main className="grid flex-1 gap-6 lg:grid-cols-[1.05fr_0.95fr] lg:items-start">
           <div className="flex flex-col gap-6">
