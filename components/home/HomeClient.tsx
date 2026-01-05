@@ -14,6 +14,7 @@ import { defineTools, fetchUrlText, fetchWikipediaExtract, runSedCommand } from 
 import PolicyPanel from "@/components/home/PolicyPanel";
 import ModelLogPanel from "@/components/home/ModelLogPanel";
 import { getContentDimensions, getPaperDimensions, type PaperOrientation, type PaperSize } from "@/lib/paper";
+import AiEditPanel from "@/components/home/AiEditPanel";
 
 type TestStatus = {
   message: string;
@@ -51,6 +52,9 @@ export default function HomeClient() {
   const [generationStatus, setGenerationStatus] = useState<string | null>(null);
   const [toolLogs, setToolLogs] = useState<ToolLogEntry[]>([]);
   const [modelLogs, setModelLogs] = useState<ModelLogEntry[]>([]);
+  const [editPrompt, setEditPrompt] = useState("");
+  const [isEditing, setIsEditing] = useState(false);
+  const [editStatus, setEditStatus] = useState<string | null>(null);
   const [paperSize, setPaperSize] = useState<PaperSize>(defaultPolicy.size);
   const [paperOrientation, setPaperOrientation] = useState<PaperOrientation>(
     defaultPolicy.orientation
@@ -542,6 +546,302 @@ export default function HomeClient() {
     }
   };
 
+  const handleAiEdit = async () => {
+    if (!endpointUrl.trim()) {
+      setEditStatus("Add an endpoint URL first.");
+      return;
+    }
+    if (!apiKey.trim()) {
+      setEditStatus("Add an API key first.");
+      return;
+    }
+    if (!editPrompt.trim()) {
+      setEditStatus("Describe the edit you want applied.");
+      return;
+    }
+    setIsEditing(true);
+    setEditStatus(null);
+    setToolLogs([]);
+    setModelLogs([
+      {
+        id: `edit-start-${Date.now()}`,
+        status: "info",
+        message: "Edit session started.",
+      },
+    ]);
+
+    try {
+      const normalized = endpointUrl.replace(/\/$/, "");
+      const systemPrompt = [
+        "You are editing an existing markdown cheat sheet.",
+        "Use the Sed tool to make precise line-based changes.",
+        "Do not output the full document unless explicitly asked.",
+      ].join(" ");
+
+      const tools = defineTools();
+      const messages: Array<
+        | { role: "system"; content: string }
+        | { role: "user"; content: string }
+        | { role: "assistant"; content?: string; tool_calls?: any[] }
+        | { role: "tool"; tool_call_id: string; content: string }
+      > = [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Current draft:\n${draft}\n\nEdit request:\n${editPrompt}`,
+        },
+      ];
+
+      const maxIterations = 4;
+      for (let i = 0; i < maxIterations; i += 1) {
+        setModelLogs((prev) => [
+          ...prev,
+          {
+            id: `edit-request-${i}`,
+            status: "info",
+            message: `Sending edit request (iteration ${i + 1}).`,
+          },
+        ]);
+        const response = await fetch(`${normalized}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: modelName,
+            temperature: 0.2,
+            messages,
+            tools,
+            tool_choice: "auto",
+          }),
+        });
+        if (!response.ok) {
+          setEditStatus(`Edit failed (${response.status}).`);
+          setModelLogs((prev) => [
+            ...prev,
+            {
+              id: `edit-error-${i}`,
+              status: "error",
+              message: `Model responded with ${response.status}.`,
+            },
+          ]);
+          return;
+        }
+        const data = (await response.json()) as {
+          choices?: {
+            message?: {
+              content?: string;
+              tool_calls?: Array<{
+                id: string;
+                function: { name: string; arguments: string };
+              }>;
+            };
+          }[];
+        };
+        const message = data.choices?.[0]?.message;
+        if (!message) {
+          setEditStatus("No response message returned by the model.");
+          setModelLogs((prev) => [
+            ...prev,
+            {
+              id: `edit-missing-${i}`,
+              status: "error",
+              message: "No message returned by the model.",
+            },
+          ]);
+          return;
+        }
+
+        if (message.tool_calls && message.tool_calls.length > 0) {
+          const names = message.tool_calls.map((call) => call.function.name).join(", ");
+          setModelLogs((prev) => [
+            ...prev,
+            {
+              id: `edit-tools-${i}`,
+              status: "info",
+              message: `Model requested tools: ${names}.`,
+            },
+          ]);
+          messages.push({ role: "assistant", tool_calls: message.tool_calls });
+          for (const toolCall of message.tool_calls) {
+            const toolName = toolCall.function.name;
+            const logId = `${toolCall.id}-${toolName}`;
+            let parsedArgs: any = {};
+            try {
+              parsedArgs = JSON.parse(toolCall.function.arguments || "{}");
+            } catch {
+              parsedArgs = {};
+            }
+
+            const pushLog = (update: ToolLogEntry) => {
+              setToolLogs((prev) => {
+                const existing = prev.find((entry) => entry.id === update.id);
+                if (existing) {
+                  return prev.map((entry) =>
+                    entry.id === update.id ? update : entry
+                  );
+                }
+                return [...prev, update];
+              });
+            };
+
+            const baseLog: ToolLogEntry = {
+              id: logId,
+              name: toolName,
+              status: "pending",
+              message: `Preparing ${toolName}…`,
+            };
+            pushLog(baseLog);
+
+            let toolResult = "Tool executed.";
+            try {
+              if (toolName === "Fetch") {
+                const url = String(parsedArgs.url || "");
+                const approved = window.confirm(
+                  `Allow Fetch tool to load:\n${url}`
+                );
+                if (!approved) {
+                  pushLog({
+                    ...baseLog,
+                    status: "denied",
+                    message: `User denied Fetch for ${url}.`,
+                  });
+                  toolResult = "User denied Fetch request.";
+                } else {
+                  pushLog({
+                    ...baseLog,
+                    status: "approved",
+                    message: `Fetching ${url}`,
+                  });
+                  toolResult = await fetchUrlText(url);
+                  pushLog({
+                    ...baseLog,
+                    status: "completed",
+                    message: `Fetched ${url} (${toolResult.length} chars).`,
+                  });
+                }
+              } else if (toolName === "Wiki") {
+                const article = String(parsedArgs.article || "");
+                const summary = Boolean(parsedArgs.summary);
+                toolResult = await fetchWikipediaExtract(article, summary);
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: `Wikipedia ${summary ? "summary" : "extract"}: ${article}`,
+                });
+              } else if (toolName === "Sed") {
+                const { result, updatedDraft } = runSedCommand(
+                  draft,
+                  parsedArgs
+                );
+                toolResult = result;
+                if (updatedDraft !== undefined) {
+                  setDraft(updatedDraft);
+                }
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: `Sed ${parsedArgs.action || "run"} ${parsedArgs.range || ""}`,
+                });
+              } else if (toolName === "Question") {
+                const question = String(parsedArgs.question || "Provide input:");
+                const answer = window.prompt(question) ?? "";
+                toolResult = answer.trim() ? answer : "User cancelled input.";
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: "User answered Question.",
+                });
+              } else if (toolName === "Think") {
+                toolResult = "Thought acknowledged.";
+                pushLog({
+                  ...baseLog,
+                  status: "completed",
+                  message: "Think step logged (internal).",
+                });
+              } else {
+                toolResult = `Unknown tool: ${toolName}`;
+                pushLog({
+                  ...baseLog,
+                  status: "error",
+                  message: `Unknown tool ${toolName}`,
+                });
+              }
+            } catch (error) {
+              const message =
+                error instanceof Error ? error.message : "Tool error.";
+              toolResult = `Tool error: ${message}`;
+              pushLog({
+                ...baseLog,
+                status: "error",
+                message,
+              });
+            }
+
+            messages.push({
+              role: "tool",
+              tool_call_id: toolCall.id,
+              content: toolResult,
+            });
+          }
+          continue;
+        }
+
+        const content = message.content?.trim();
+        if (content) {
+          setEditStatus(
+            "Model returned a full response. Ask for a more specific edit."
+          );
+          setModelLogs((prev) => [
+            ...prev,
+            {
+              id: `edit-content-${i}`,
+              status: "error",
+              message: "Model returned content instead of tool edits.",
+            },
+          ]);
+          return;
+        }
+
+        setEditStatus("Edit applied.");
+        setModelLogs((prev) => [
+          ...prev,
+          {
+            id: `edit-done-${i}`,
+            status: "success",
+            message: "Edit completed.",
+          },
+        ]);
+        return;
+      }
+
+      setEditStatus("Edit loop exceeded the maximum iterations.");
+      setModelLogs((prev) => [
+        ...prev,
+        {
+          id: "edit-limit",
+          status: "error",
+          message: "Edit loop exceeded the maximum iterations.",
+        },
+      ]);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unknown error.";
+      setEditStatus(`Edit error: ${message}`);
+      setModelLogs((prev) => [
+        ...prev,
+        {
+          id: "edit-exception",
+          status: "error",
+          message: `Edit error: ${message}`,
+        },
+      ]);
+    } finally {
+      setIsEditing(false);
+    }
+  };
+
   const handleExportPdf = () => {
     const previewHtml = previewRef.current?.innerHTML;
     if (!previewHtml) {
@@ -615,18 +915,27 @@ export default function HomeClient() {
       <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-6 py-10">
         <Header />
 
-        <main className="grid flex-1 gap-6 lg:grid-cols-[1.05fr_0.95fr]">
-          <EditorPanel
-            draft={draft}
-            stats={stats}
-            lastSaved={lastSaved}
-            isRestored={isRestored}
-            paperStyle={paperStyle}
-            fontSizePx={fontSizePx}
-            onDraftChange={setDraft}
-          />
-
+        <main className="grid flex-1 gap-6 lg:grid-cols-[1.05fr_0.95fr] lg:items-start">
           <div className="flex flex-col gap-6">
+            <EditorPanel
+              draft={draft}
+              stats={stats}
+              lastSaved={lastSaved}
+              isRestored={isRestored}
+              paperStyle={paperStyle}
+              fontSizePx={fontSizePx}
+              onDraftChange={setDraft}
+            />
+            <AiEditPanel
+              prompt={editPrompt}
+              isEditing={isEditing}
+              statusMessage={editStatus}
+              onPromptChange={setEditPrompt}
+              onApply={handleAiEdit}
+            />
+          </div>
+
+          <div className="flex flex-col gap-6 lg:sticky lg:top-6 lg:max-h-[calc(100vh-4rem)] lg:overflow-auto lg:pr-2">
             <SettingsPanel
               endpointUrl={endpointUrl}
               apiKey={apiKey}
